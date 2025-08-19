@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>My Rough Notebook</title>
+  <meta name="description" content="A super-simple personal notes app that saves locally and can export to Excel (CSV)." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>📝</text></svg>">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Make textarea grow with content */
+    textarea { resize: vertical; }
+  </style>
+</head>
+<body class="min-h-screen bg-slate-50 text-slate-900 antialiased">
+  <div class="max-w-4xl mx-auto p-4 sm:p-6">
+    <header class="mb-6 flex items-center justify-between">
+      <div>
+        <h1 class="text-2xl sm:text-3xl font-bold tracking-tight">My Rough Notebook</h1>
+        <p class="text-sm text-slate-600">Type anything. Hit <span class="font-semibold">Publish</span>. Your posts are saved in your browser (no database).</p>
+      </div>
+      <button id="toggleTheme" class="px-3 py-2 rounded-xl border text-sm font-medium shadow-sm hover:shadow transition">Toggle theme</button>
+    </header>
+
+    <!-- Composer -->
+    <section class="mb-6">
+      <div class="bg-white rounded-2xl shadow p-4 sm:p-5 border">
+        <label class="block text-sm font-medium mb-2" for="noteInput">Write your note</label>
+        <textarea id="noteInput" class="w-full rounded-xl border p-3 focus:outline-none focus:ring focus:ring-indigo-200" rows="6" placeholder="Whatever comes to mind..."></textarea>
+        <div class="mt-3 flex flex-wrap items-center gap-2">
+          <button id="publishBtn" class="px-4 py-2 rounded-xl bg-indigo-600 text-white font-medium shadow hover:bg-indigo-700">Publish</button>
+          <button id="clearDraftBtn" class="px-4 py-2 rounded-xl border font-medium hover:bg-slate-50">Clear draft</button>
+          <span id="charCount" class="ml-auto text-xs text-slate-500"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Controls -->
+    <section class="mb-4 flex flex-col sm:flex-row gap-3 sm:items-center">
+      <div class="flex-1 flex items-center gap-2">
+        <input id="searchInput" class="w-full rounded-xl border p-2" placeholder="Search notes..." />
+        <select id="sortSelect" class="rounded-xl border p-2">
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="az">Title A–Z</option>
+          <option value="za">Title Z–A</option>
+        </select>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <button id="exportCsvBtn" class="px-3 py-2 rounded-xl border font-medium">Export CSV</button>
+        <button id="exportJsonBtn" class="px-3 py-2 rounded-xl border font-medium">Backup JSON</button>
+        <label class="px-3 py-2 rounded-xl border font-medium cursor-pointer" title="Import a JSON backup">
+          Import JSON
+          <input id="importJsonInput" type="file" accept="application/json" class="hidden" />
+        </label>
+        <button id="deleteAllBtn" class="px-3 py-2 rounded-xl border font-medium text-red-600">Delete All</button>
+      </div>
+    </section>
+
+    <!-- Empty state -->
+    <div id="emptyState" class="hidden rounded-2xl border border-dashed p-10 text-center text-slate-600 bg-white">
+      <p class="text-lg">No posts yet. Write something above and hit <span class="font-semibold">Publish</span> ✨</p>
+    </div>
+
+    <!-- Posts list -->
+    <section id="postsList" class="grid gap-4"></section>
+
+    <footer class="mt-10 text-center text-xs text-slate-500">
+      <p>Private to your browser. Export CSV to open in Excel. You can host this file on GitHub Pages.</p>
+    </footer>
+  </div>
+
+  <script>
+    // --- Storage helpers (localStorage) ---
+    const STORAGE_KEY = 'rough-notebook.posts.v1';
+    const THEME_KEY = 'rough-notebook.theme';
+
+    function loadPosts() {
+      try {
+        return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+      } catch (e) {
+        console.error('Failed to parse posts from storage', e);
+        return [];
+      }
+    }
+
+    function savePosts(posts) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(posts));
+    }
+
+    // --- Utility functions ---
+    const fmtDate = (ts) => new Date(ts).toLocaleString();
+    const firstLine = (text) => (text || '').trim().split(/\n|\r/)[0].slice(0, 80);
+
+    function uid() {
+      return Math.random().toString(36).slice(2) + Date.now().toString(36);
+    }
+
+    function download(filename, content, type = 'text/plain') {
+      const blob = new Blob([content], { type });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function toCsv(posts) {
+      // CSV columns: id, createdAt, updatedAt, title, content
+      const header = ['id','createdAt','updatedAt','title','content'];
+      const esc = (v) => '"' + String(v).replaceAll('"', '""') + '"';
+      const rows = posts.map(p => [
+        p.id,
+        new Date(p.createdAt).toISOString(),
+        p.updatedAt ? new Date(p.updatedAt).toISOString() : '',
+        firstLine(p.content),
+        p.content
+      ].map(esc).join(','));
+      return [header.join(','), ...rows].join('\n');
+    }
+
+    // --- State ---
+    let posts = loadPosts();
+
+    // --- DOM Elements ---
+    const noteInput = document.getElementById('noteInput');
+    const publishBtn = document.getElementById('publishBtn');
+    const clearDraftBtn = document.getElementById('clearDraftBtn');
+    const postsList = document.getElementById('postsList');
+    const emptyState = document.getElementById('emptyState');
+    const searchInput = document.getElementById('searchInput');
+    const sortSelect = document.getElementById('sortSelect');
+    const exportCsvBtn = document.getElementById('exportCsvBtn');
+    const exportJsonBtn = document.getElementById('exportJsonBtn');
+    const importJsonInput = document.getElementById('importJsonInput');
+    const deleteAllBtn = document.getElementById('deleteAllBtn');
+    const charCount = document.getElementById('charCount');
+    const toggleTheme = document.getElementById('toggleTheme');
+
+    // --- Theme ---
+    function applyTheme() {
+      const theme = localStorage.getItem(THEME_KEY) || 'light';
+      if (theme === 'dark') {
+        document.documentElement.classList.add('dark');
+        document.body.className = document.body.className.replace('bg-slate-50 text-slate-900', 'bg-slate-900 text-slate-100');
+      } else {
+        document.documentElement.classList.remove('dark');
+        document.body.className = document.body.className.replace('bg-slate-900 text-slate-100', 'bg-slate-50 text-slate-900');
+      }
+    }
+    applyTheme();
+
+    toggleTheme.addEventListener('click', () => {
+      const t = localStorage.getItem(THEME_KEY) || 'light';
+      localStorage.setItem(THEME_KEY, t === 'light' ? 'dark' : 'light');
+      applyTheme();
+    });
+
+    // --- Rendering ---
+    function render() {
+      const q = (searchInput.value || '').toLowerCase();
+      let filtered = posts.filter(p => p.content.toLowerCase().includes(q));
+
+      const sort = sortSelect.value;
+      if (sort === 'newest') filtered.sort((a,b) => b.createdAt - a.createdAt);
+      if (sort === 'oldest') filtered.sort((a,b) => a.createdAt - b.createdAt);
+      if (sort === 'az') filtered.sort((a,b) => firstLine(a.content).localeCompare(firstLine(b.content)));
+      if (sort === 'za') filtered.sort((a,b) => firstLine(b.content).localeCompare(firstLine(a.content)));
+
+      postsList.innerHTML = '';
+      emptyState.classList.toggle('hidden', filtered.length !== 0);
+
+      for (const p of filtered) {
+        const card = document.createElement('article');
+        card.className = 'bg-white rounded-2xl shadow p-4 border';
+        const title = firstLine(p.content) || '(untitled)';
+        card.innerHTML = `
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <h2 class="font-semibold text-lg">${escapeHtml(title)}</h2>
+              <p class="text-xs text-slate-500">Created ${escapeHtml(fmtDate(p.createdAt))}${p.updatedAt ? ' • Updated ' + escapeHtml(fmtDate(p.updatedAt)) : ''}</p>
+            </div>
+            <div class="flex gap-2">
+              <button data-action="edit" data-id="${p.id}" class="px-3 py-1 rounded-lg border text-sm">Edit</button>
+              <button data-action="delete" data-id="${p.id}" class="px-3 py-1 rounded-lg border text-sm text-red-600">Delete</button>
+            </div>
+          </div>
+          <pre class="mt-3 whitespace-pre-wrap text-sm leading-relaxed">${escapeHtml(p.content)}</pre>
+        `;
+        postsList.appendChild(card);
+      }
+    }
+
+    function escapeHtml(str) {
+      return String(str)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+    }
+
+    // --- Actions ---
+    publishBtn.addEventListener('click', () => {
+      const content = noteInput.value.trim();
+      if (!content) {
+        alert('Write something first 🙂');
+        noteInput.focus();
+        return;
+      }
+      const post = { id: uid(), content, createdAt: Date.now(), updatedAt: null };
+      posts.unshift(post);
+      savePosts(posts);
+      noteInput.value = '';
+      updateCharCount();
+      render();
+    });
+
+    clearDraftBtn.addEventListener('click', () => {
+      noteInput.value = '';
+      updateCharCount();
+      noteInput.focus();
+    });
+
+    postsList.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-action]');
+      if (!btn) return;
+      const id = btn.getAttribute('data-id');
+      const idx = posts.findIndex(p => p.id === id);
+      if (idx === -1) return;
+
+      if (btn.dataset.action === 'delete') {
+        if (confirm('Delete this post?')) {
+          posts.splice(idx, 1);
+          savePosts(posts);
+          render();
+        }
+      }
+
+      if (btn.dataset.action === 'edit') {
+        const newContent = prompt('Edit note:', posts[idx].content);
+        if (newContent !== null) {
+          posts[idx].content = newContent;
+          posts[idx].updatedAt = Date.now();
+          savePosts(posts);
+          render();
+        }
+      }
+    });
+
+    searchInput.addEventListener('input', render);
+    sortSelect.addEventListener('change', render);
+
+    exportCsvBtn.addEventListener('click', () => {
+      const csv = toCsv(posts);
+      download('notes.csv', csv, 'text/csv');
+    });
+
+    exportJsonBtn.addEventListener('click', () => {
+      download('notes-backup.json', JSON.stringify(posts, null, 2), 'application/json');
+    });
+
+    importJsonInput.addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        if (!Array.isArray(data)) throw new Error('Invalid JSON');
+        // Basic shape check
+        const sanitized = data.map(p => ({
+          id: String(p.id || uid()),
+          content: String(p.content || ''),
+          createdAt: Number(p.createdAt || Date.now()),
+          updatedAt: p.updatedAt ? Number(p.updatedAt) : null,
+        }));
+        posts = sanitized;
+        savePosts(posts);
+        render();
+        alert('Imported successfully.');
+      } catch (err) {
+        console.error(err);
+        alert('Import failed. Make sure this is a valid backup JSON exported by this app.');
+      } finally {
+        e.target.value = '';
+      }
+    });
+
+    deleteAllBtn.addEventListener('click', () => {
+      if (posts.length === 0) return;
+      if (confirm('Delete ALL posts? This cannot be undone.')) {
+        posts = [];
+        savePosts(posts);
+        render();
+      }
+    });
+
+    // Draft character count
+    function updateCharCount() {
+      const len = noteInput.value.length;
+      charCount.textContent = len ? `${len} characters` : '';
+    }
+    noteInput.addEventListener('input', updateCharCount);
+
+    // Initial render
+    render();
+  </script>
+</body>
+</html>
